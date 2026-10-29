@@ -3,10 +3,14 @@ Dataset generator for Johnson's algorithm and A* search.
 
 Use it three ways
 -----------------
-1. Interactive prompts:      python dataset_generator.py      (saves into ./simulation/)
+1. Interactive prompts:      python dataset_generator.py
+                             Select Random Datasets, Test Cases, or View Saved Datasets.
+                             Interactive datasets are saved by algorithm under
+                             ./simulation/johnson/ and ./simulation/astar/.
 2. Command line (scripted):  python dataset_generator.py johnson --nodes 50 --edges 200 --seed 7
                              python dataset_generator.py grid --rows 100 --cols 100 --obstacles 0.2
                              python dataset_generator.py geometric --nodes 300 --extra-edges 600
+                             python dataset_generator.py tests
                              python dataset_generator.py suite --out datasets
 3. As a module (Jupyter):    import dataset_generator as gen
                              ds = gen.johnson_dataset(n=12, edge_count=30, seed=42)
@@ -38,7 +42,11 @@ import sys
 
 INF = float("inf")
 FW_LIMIT = 400  # Floyd-Warshall reference is O(n^3); skipped above this size
-SIM_DIR = "simulation"  # every dataset is saved here; the visualizer reads from here
+SIM_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "Datasets"
+)
+import os
 
 
 # --------------------------------------------------------------------------
@@ -258,7 +266,7 @@ def geometric_dataset(n, extra_edges, seed=None, isolate_last=False,
 
 
 def fixed_cases():
-    """The two professor test cases (Johnson Test Case 1 and 2)."""
+    """Two fixed Johnson test cases (normal and negative-cycle graphs)."""
     tc1 = [(0, 1, -2), (1, 2, -1), (2, 0, 4), (0, 3, 3), (2, 3, 1)]
     return [johnson_from_edges("johnson_tc1_negative_weights", 4, tc1),
             johnson_from_edges("johnson_tc2_negative_cycle", 4, tc1 + [(2, 1, -2)])]
@@ -362,35 +370,42 @@ def describe(ds):
 
 
 def list_datasets(folder=SIM_DIR):
-    """Datasets currently in `folder`, newest first (read from file headers)."""
+    """List saved datasets in this folder and its subfolders, newest first."""
     if not os.path.isdir(folder):
         return []
     rows = []
-    for fn in os.listdir(folder):
-        if not fn.endswith(".txt"):
-            continue
-        path = os.path.join(folder, fn)
-        with open(path) as f:
-            head = f.readline()
-        meta = dict(t.split("=", 1) for t in head.lstrip("# ").split() if "=" in t)
-        rows.append(dict(name=fn[:-4], path=path, mtime=os.path.getmtime(path),
-                         **{k: meta.get(k, "?") for k in
-                            ("mode", "kind", "nodes", "edges", "seed")}))
+    for root, _, filenames in os.walk(folder):
+        for fn in filenames:
+            if not fn.endswith(".txt"):
+                continue
+            path = os.path.join(root, fn)
+            with open(path) as f:
+                head = f.readline()
+            if not head.startswith("#"):
+                continue
+            meta = dict(t.split("=", 1) for t in head.lstrip("# ").split()
+                        if "=" in t)
+            rows.append(dict(
+                name=fn[:-4], path=path, mtime=os.path.getmtime(path),
+                **{k: meta.get(k, "?") for k in
+                   ("mode", "kind", "nodes", "edges", "seed")}
+            ))
     return sorted(rows, key=lambda r: -r["mtime"])
 
 
 def choose_dataset(folder=SIM_DIR):
-    """Print the datasets in `folder`, prompt for one, return it (None = done)."""
+    """Prompt for a saved dataset (including nested folders)."""
     rows = list_datasets(folder)
     if not rows:
         print(f"No datasets in '{folder}/' yet. Generate some first.")
         return None
-    print(f"\nDatasets in '{folder}/' (newest first):")
+    print(f"\nSaved datasets in '{folder}/' (newest first):")
     for i, r in enumerate(rows, 1):
-        print(f"  {i:>2}) {r['name']:<38} {r['mode']:<7} {r['kind']:<10} "
+        location = os.path.relpath(r["path"], folder)
+        print(f"  {i:>2}) {location:<50} {r['mode']:<7} "
               f"nodes={r['nodes']:<6} edges={r['edges']}")
     while True:
-        raw = input("Pick a number (blank = done): ").strip()
+        raw = input("Pick a number (blank = back): ").strip()
         if raw == "":
             return None
         if raw.isdigit() and 1 <= int(raw) <= len(rows):
@@ -451,14 +466,15 @@ def ask_seed():
         print("  Not an integer, using it as a text seed.")
         return raw
 
-
 def _finish(ds, out, show=None):
-    """Save to the folder, describe, and (optionally) draw it immediately."""
-    save_dataset(ds, out)
-    print("  ->", describe(ds), f"[saved in {out}/]")
+    """Save the dataset and print its exact location."""
+    path = save_dataset(ds, out)
+
+    print("  ->", describe(ds))
+    print("Saved at:", os.path.abspath(path))
+
     if show:
         show(ds)
-
 
 def prompt_johnson(out, with_cycle=False, show=None):
     n = ask("Number of vertices", int, 2, 5000, 20)
@@ -494,39 +510,126 @@ def prompt_geometric(out, show=None):
     _finish(ds, out, show)
 
 
-MENU = """
-What would you like to generate?
-  1) Johnson graph (negative weights, no negative cycle)
-  2) Johnson graph WITH a negative cycle (+1 edge; should be rejected)
-  3) A* grid map (optional obstacles, custom start/goal)
-  4) A* random geometric graph (coordinates, queries)
-  5) Fixed professor test cases (Test Case 1 and 2)
-  6) Full default suite (10 datasets, fixed seeds)
-  0) Quit"""
+MAIN_MENU = """
+========== DATASET GENERATOR ==========
+1) Generate Random Datasets
+2) Generate Test Cases
+3) View Saved Datasets
+0) Exit"""
+
+RANDOM_MENU = """
+========== RANDOM DATASETS ==========
+1) Johnson - Random weighted graph
+2) Johnson - Negative cycle graph
+3) A* - Random grid
+4) A* - Random geometric graph
+0) Back"""
+
+TEST_MENU = """
+========== TEST CASES ==========
+1) Johnson - Negative Weights (No Negative Cycle)
+2) Johnson - Negative Cycle Detection
+3) A* - 100x100 Grid (A* vs Dijkstra)
+4) Generate All Test Cases
+0) Back"""
+
+
+def test_cases():
+    """Return the three fixed test datasets for algorithm verification.
+
+    The A* dataset contains an expected path distance of 198, but generating
+    it does not run the user's A* or Dijkstra algorithms or count expansions.
+    """
+    tc1, tc2 = fixed_cases()
+    tc3 = grid_dataset(100, 100, obstacle_prob=0.0, seed=0,
+                       start=(0, 0), goal=(99, 99),
+                       name="astar_grid100_open")
+    return [tc1, tc2, tc3]
+
+
+def _save_by_algorithm(ds, root, show=None):
+    """Save interactive datasets by mode so both collaborators stay organized."""
+    target = os.path.join(root, ds["mode"])
+    _finish(ds, target, show)
+
+
+def random_datasets_menu(out=SIM_DIR, show=None):
+    """Prompt for custom Johnson/A* graphs; 0 returns to main menu."""
+    while True:
+        print(RANDOM_MENU)
+        choice = input("Choose a random dataset [0-4]: ").strip()
+        if choice in ("0", "q", ""):
+            return
+        if choice == "1":
+            prompt_johnson(os.path.join(out, "johnson"), show=show)
+        elif choice == "2":
+            prompt_johnson(os.path.join(out, "johnson"), with_cycle=True,
+                           show=show)
+        elif choice == "3":
+            prompt_grid(os.path.join(out, "astar"), show=show)
+        elif choice == "4":
+            prompt_geometric(os.path.join(out, "astar"), show=show)
+        else:
+            print("  Unknown choice. Choose 0-4.")
+
+
+def test_cases_menu(out=SIM_DIR, show=None):
+    """Save selected predefined test case(s); 0 returns to main menu."""
+    while True:
+        print(TEST_MENU)
+        choice = input("Choose a test case [0-4]: ").strip()
+        if choice in ("0", "q", ""):
+            return
+        if choice in ("1", "2", "3", "4"):
+            cases = test_cases() if choice in ("3", "4") else fixed_cases()
+            selected = cases if choice == "4" else [cases[int(choice) - 1]]
+            for ds in selected:
+                _save_by_algorithm(ds, out, show)
+            if choice in ("3", "4"):
+                print("  Note: the 100x100 A* test dataset has expected distance 198.")
+                print("  Run your A* and Dijkstra implementations to compare expanded nodes.")
+        else:
+            print("  Unknown choice. Choose 0-4.")
+
+
+def view_saved_datasets(out=SIM_DIR):
+    """Inspect existing .txt graph datasets without modifying them."""
+    ds = choose_dataset(out)
+    if ds is None:
+        return
+    print("\n", describe(ds))
+    print("First 10 edges:", ds["edges"][:10])
+    if ds["mode"] == "johnson":
+        if ds["expected"] == "NEGATIVE_CYCLE":
+            print("Expected result: NEGATIVE_CYCLE")
+        elif isinstance(ds["expected"], list):
+            print(f"Expected result: {len(ds['expected'])} x "
+                  f"{len(ds['expected'])} distance matrix (.expected file)")
+        else:
+            print("Expected result: not saved for this graph size")
+    elif ds["queries"]:
+        print("A* queries (start, goal, expected distance):", ds["queries"][:5])
 
 
 def interactive(out=SIM_DIR, show=None):
-    """Menu of prompts. Everything is saved in `out`; pass show=<function> to
-    draw each dataset as soon as it is generated (the notebook does this)."""
-    out = input(f"Output folder (default '{out}'): ").strip() or out
-    actions = {
-        "1": lambda: prompt_johnson(out, show=show),
-        "2": lambda: prompt_johnson(out, with_cycle=True, show=show),
-        "3": lambda: prompt_grid(out, show=show),
-        "4": lambda: prompt_geometric(out, show=show),
-        "5": lambda: [_finish(d, out, show) for d in fixed_cases()],
-        "6": lambda: full_suite(out),
-    }
+    """Organized two-level menu; keeps random datasets and test cases separate.
+
+    Optionally pass show=<function> to draw each newly generated dataset.
+    """
     while True:
-        print(MENU)
-        choice = input("Choice: ").strip()
+        print(MAIN_MENU)
+        choice = input("Choose an option [0-3]: ").strip()
         if choice in ("0", "q", ""):
             print("Done.")
             return
-        if choice in actions:
-            actions[choice]()
+        if choice == "1":
+            random_datasets_menu(out, show=show)
+        elif choice == "2":
+            test_cases_menu(out, show=show)
+        elif choice == "3":
+            view_saved_datasets(out)
         else:
-            print("  Unknown choice.")
+            print("  Unknown choice. Choose 0-3.")
 
 
 # --------------------------------------------------------------------------
@@ -568,12 +671,18 @@ def cli(argv):
     p.add_argument("--queries", type=int, default=3)
     p.add_argument("--isolate-last", action="store_true")
     common(p)
-    p = sub.add_parser("suite", help="fixed 10-dataset suite")
+    p = sub.add_parser("suite", help="original 10-dataset suite")
+    p.add_argument("--out", default=SIM_DIR)
+    p = sub.add_parser("tests", help="generate the three predefined test cases")
     p.add_argument("--out", default=SIM_DIR)
 
     a = ap.parse_args(argv)
     if a.cmd == "suite":
         return full_suite(a.out)
+    if a.cmd == "tests":
+        for ds in test_cases():
+            _save_by_algorithm(ds, a.out)
+        return
     try:
         if a.cmd == "johnson":
             ds = johnson_dataset(a.nodes, a.edges, a.seed, not a.disconnected,
