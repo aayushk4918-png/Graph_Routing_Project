@@ -1,14 +1,16 @@
 """Interactive CSV dataset generator. Python 3.9+, standard library only.
 
-Run: python graph_generator_v4.py
-Optional batch mode: python graph_generator_v4.py --presets
+Run: python graph_generator.py
+Optional batch mode: python graph_generator.py --presets
 Importing this file never starts the menus.
 
-Datasets are saved ONLY in a datasets folder beside this script, independently
-of the terminal working directory. Each selection creates its own folder and
-one CSV for the selected algorithm. Existing datasets are never overwritten.
+All CSVs are saved directly in one Datasets folder beside this script,
+independently of the terminal working directory. No algorithm subfolders are created.
+Each dataset is a named CSV. Existing files are never overwritten.
+Use menu option 3 to copy old datasets into these shared folders.
+The notebook imports DATASETS_DIR from this file as its single path source.
 
-Node IDs start at 1 in both algorithms (1..N).
+Generated node IDs run from 0 to N-1 for both algorithms.
 Johnson node section: node_id (no coordinates generated or saved).
 A* node section: node_id,x_coordinate,y_coordinate.
 Shared edge section: source_node,target_node,weight.
@@ -18,8 +20,8 @@ graphs may take substantial time and disk space. For the negative-cycle test, -i
 Johnson must still reject that graph with Negative Cycle Detected.
 The only other CSV section is Expected Distances. Metadata and Queries are not saved.
 Choose source and goal when running your algorithm or simulation.
-The original Johnson credit cases are relabeled 0..3 -> 1..4; costs unchanged.
-Grid coordinates still start at (0,0); grid node IDs start at 1.
+The Johnson credit cases use the original labels 0..3.
+Grid coordinates still start at (0,0); grid node IDs start at 0.
 
 Future notebooks can import load_dataset and heuristic from this same file.
 The loader returns nodes={id: None} for Johnson and nodes={id: (x,y)} for A*.
@@ -30,12 +32,23 @@ heuristic tie-breaking. Expansion savings are not guaranteed by data alone.
 """
 import argparse
 import csv
-import heapq
 import math
 import random
+import shutil
+import hashlib
 from pathlib import Path
 
-DATASETS_DIR = Path(__file__).resolve().parent / 'datasets'
+DATASETS_DIR = Path(__file__).resolve().parent / 'Datasets'
+def ensure_dataset_folders():
+    DATASETS_DIR.mkdir(parents=True, exist_ok=True)
+    return DATASETS_DIR
+
+
+def list_saved_datasets():
+    ensure_dataset_folders()
+    return sorted(p for p in DATASETS_DIR.iterdir()
+                  if p.is_file() and p.suffix.lower() == '.csv')
+
 
 SECTIONS = {
     '# Nodes': ['node_id', 'x_coordinate', 'y_coordinate'],
@@ -51,11 +64,11 @@ def graph(nodes, edges, queries, **metadata):
 
 
 def johnson_case(negative_cycle=False):
-    edges = [(1, 2, -2), (2, 3, -1), (3, 1, 4), (1, 4, 3), (3, 4, 1)]
+    edges = [(0, 1, -2), (1, 2, -1), (2, 0, 4), (0, 3, 3), (2, 3, 1)]
     if negative_cycle:
-        edges.append((3, 2, -2))
-    g = graph({u: None for u in range(1, 5)},
-              edges, [(1, 4, '' if negative_cycle else -2)], algorithm='johnson',
+        edges.append((2, 1, -2))
+    g = graph({u: None for u in range(4)},
+              edges, [(0, 3, '' if negative_cycle else -2)], algorithm='johnson',
               kind='johnson_negative_cycle' if negative_cycle else 'johnson_negative_edges',
               heuristic='none', expected_negative_cycle=str(negative_cycle).lower(),
               expected_error='Negative Cycle Detected' if negative_cycle else '',
@@ -63,26 +76,26 @@ def johnson_case(negative_cycle=False):
     if not negative_cycle:
         matrix = [[0, -2, -3, -2], [3, 0, -1, 0], [4, 2, 0, 1],
                   [math.inf, math.inf, math.inf, 0]]
-        g['expected'] = [(s+1, t+1, matrix[s][t]) for s in range(4) for t in range(4)]
+        g['expected'] = [(s, t, matrix[s][t]) for s in range(4) for t in range(4)]
     return g
 
 
-def grid_graph(rows=100, cols=100, start=1, goal=None):
+def grid_graph(rows=100, cols=100, start=0, goal=None):
     """Obstacle-free 4-neighbor unit-cost grid; each direction is an arc."""
     if rows < 1 or cols < 1:
         raise ValueError('Grid dimensions must be positive.')
     n = rows * cols
-    goal = n if goal is None else goal
-    if not (1 <= start <= n and 1 <= goal <= n):
+    goal = n - 1 if goal is None else goal
+    if not (0 <= start < n and 0 <= goal < n):
         raise ValueError('Start and goal must be valid node IDs.')
-    nodes = {r * cols + c + 1: (c, r) for r in range(rows) for c in range(cols)}
+    nodes = {r * cols + c: (c, r) for r in range(rows) for c in range(cols)}
     edges = []
     for r in range(rows):
         for c in range(cols):
-            u = r * cols + c + 1
+            u = r * cols + c
             for rr, cc in ((r + 1, c), (r, c + 1)):
                 if rr < rows and cc < cols:
-                    v = rr * cols + cc + 1
+                    v = rr * cols + cc
                     edges.extend([(u, v, 1), (v, u, 1)])
     sx, sy = nodes[start]
     tx, ty = nodes[goal]
@@ -108,7 +121,7 @@ def random_graph(n, m, seed=42, query_count=1, ensure_connected=True, extra_max=
         raise ValueError('Query count and max weight must be positive; extra cost nonnegative.')
     rng = random.Random(seed)
     nodes = {u: ((rng.randrange(1000), rng.randrange(1000)) if spatial else None)
-             for u in range(1, n+1)}
+             for u in range(n)}
     # Integer lattice avoids rounding uncertainty in ceil(Euclidean distance).
     def encode(u, v):
         return u * (n - 1) + (v if v < u else v - 1)
@@ -125,7 +138,6 @@ def random_graph(n, m, seed=42, query_count=1, ensure_connected=True, extra_max=
     for index in sorted(selected):
         u, offset = divmod(index, n - 1)
         v = offset if offset < u else offset + 1
-        u, v = u + 1, v + 1  # Candidate indices are internal; public IDs are 1..N.
         if spatial:
             x, y = nodes[u]
             xx, yy = nodes[v]
@@ -138,7 +150,7 @@ def random_graph(n, m, seed=42, query_count=1, ensure_connected=True, extra_max=
         edges.append((u, v, weight))
     queries = []
     for _ in range(query_count):
-        s, t = rng.sample(range(1, n+1), 2) if n > 1 else (1, 1)
+        s, t = rng.sample(range(n), 2) if n > 1 else (0, 0)
         queries.append((s, t, ''))
     return graph(nodes, edges, queries,
                  kind='random_spatial' if spatial else 'random_weighted', seed=seed,
@@ -151,8 +163,9 @@ def random_graph(n, m, seed=42, query_count=1, ensure_connected=True, extra_max=
 
 def validate(g):
     nodes = g['nodes']
-    if not nodes or set(nodes) != set(range(1, len(nodes)+1)):
-        raise ValueError('Node IDs must be contiguous integers starting at one.')
+    base = min(nodes, default=0)  # Also accept earlier saved CSVs numbered from 1.
+    if not nodes or base not in (0, 1) or set(nodes) != set(range(base, base + len(nodes))):
+        raise ValueError('Node IDs must be contiguous integers starting at zero or one.')
     seen = set()
     for u, v, w in g['edges']:
         if u not in nodes or v not in nodes or u == v or (u, v) in seen:
@@ -166,60 +179,122 @@ def validate(g):
 
 
 def reference_distances(g):
-    """Yield exact distances for every ordered pair, including self/unreachable.
-
-    Uses repeated Dijkstra for nonnegative weights and repeated Bellman-Ford
-    for negative weights, independently of the student's Johnson/A* code.
-    Rows are streamed so a full N x N matrix need not be held in memory.
-    Time: O(V*(V+E)*log(V)) nonnegative; O(V^2*E) negative in worst case.
-    CSV size is still quadratic: V^2 expected-distance rows.
-    """
+    """Floyd–Warshall all-pairs oracle. O(V³) time and O(V²) memory."""
     ids = sorted(g['nodes'])
-    edges = g['edges']
-    negative = any(w < 0 for _, _, w in edges)
-    adjacency = {u: [] for u in ids}
-    for u, v, w in edges:
-        adjacency[u].append((v, w))
-    for source in ids:
-        distance = {u: math.inf for u in ids}
-        distance[source] = 0
-        if negative:
-            for _ in range(len(ids) - 1):
-                changed = False
-                for u, v, w in edges:
-                    candidate = distance[u] + w
-                    if candidate < distance[v]:
-                        distance[v] = candidate
-                        changed = True
-                if not changed:
-                    break
-            affected = {v for u, v, w in edges if distance[u] + w < distance[v]}
-            pending = list(affected)
-            while pending:
-                u = pending.pop()
-                for v, _ in adjacency[u]:
-                    if v not in affected:
-                        affected.add(v)
-                        pending.append(v)
-            for u in affected:
-                distance[u] = -math.inf
-        else:
-            queue = [(0, source)]
-            while queue:
-                cost, u = heapq.heappop(queue)
-                if cost != distance[u]:
-                    continue
-                for v, w in adjacency[u]:
-                    candidate = cost + w
-                    if candidate < distance[v]:
-                        distance[v] = candidate
-                        heapq.heappush(queue, (candidate, v))
-        for target in ids:
-            yield source, target, distance[target]
+    index = {node: i for i, node in enumerate(ids)}
+    size = len(ids)
+    distance = [[math.inf] * size for _ in ids]
+    for i in range(size):
+        distance[i][i] = 0
+    for source, target, weight in g['edges']:
+        i, j = index[source], index[target]
+        distance[i][j] = min(distance[i][j], weight)
+
+    # Permit one additional intermediate vertex on each pass.
+    for k in range(size):
+        via_k = distance[k]
+        for row in distance:
+            to_k = row[k]
+            if to_k == math.inf:
+                continue
+            for j, from_k in enumerate(via_k):
+                if from_k != math.inf:
+                    candidate = to_k + from_k
+                    if candidate < row[j]:
+                        row[j] = candidate
+
+    # Only pairs that can travel through a negative cycle are unbounded.
+    cycles = [k for k in range(size) if distance[k][k] < 0]
+    for k in cycles:
+        reachable = [j for j in range(size) if distance[k][j] != math.inf]
+        for row in distance:
+            if row[k] != math.inf:
+                for j in reachable:
+                    row[j] = -math.inf
+
+    for i, source in enumerate(ids):
+        for j, target in enumerate(ids):
+            yield source, target, distance[i][j]
+
+
+def valid_dataset_name(name):
+    return bool(name and name not in ('.', '..') and not name.endswith((' ', '.'))
+                and not any(c in name for c in '<>:"/\\|?*')
+                and not name.lower().endswith('.csv'))
+
+
+def csv_algorithm(path):
+    """Classify by the Nodes header, not by a possibly renamed filename."""
+    with Path(path).open(newline='', encoding='utf-8-sig') as handle:
+        awaiting = False
+        for row in csv.reader(handle):
+            if not row: continue
+            row = [cell.strip() for cell in row]
+            if row == ['# Nodes']:
+                awaiting = True
+                continue
+            if awaiting:
+                if row == ['node_id']: return 'johnson'
+                if row == ['node_id', 'x_coordinate', 'y_coordinate']: return 'astar'
+                raise ValueError('Unrecognized Nodes header.')
+    raise ValueError('No sectioned Nodes header found; use the current CSV format.')
+
+
+def content_digest(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def import_datasets(source_folder):
+    """Copy old CSVs into the shared folders. Originals remain untouched.
+
+    Identical content is skipped even if its filename differs. Name collisions
+    receive numeric suffixes; algorithm is inferred from the Nodes header.
+    """
+    source = Path(source_folder).expanduser().resolve()
+    if not source.is_dir(): raise ValueError('Choose an existing folder containing CSVs.')
+    ensure_dataset_folders()
+    known = {content_digest(path) for path in list_saved_datasets()}
+    copied = []; skipped = 0; rejected = []
+    candidates = sorted(p for p in source.rglob('*') if p.is_file() and p.suffix.lower()=='.csv')
+    for path in candidates:
+        try:
+            algorithm = csv_algorithm(path)
+            digest = content_digest(path)
+            if digest in known:
+                skipped += 1
+                continue
+            # Prefix the parent folder, since earlier versions named every CSV johnson.csv/astar.csv.
+            raw_name = path.parent.name + '_' + path.stem
+            name = ''.join('_' if c in '<>:"/\\|?*' else c for c in raw_name).strip(' .') or 'imported_dataset'
+            destination = DATASETS_DIR / f'{name}.csv'
+            suffix = 2
+            while destination.exists():
+                destination = destination.with_name(f'{name}_{suffix}.csv')
+                suffix += 1
+            shutil.copy2(path, destination)
+            known.add(digest); copied.append(destination)
+        except (OSError, ValueError) as error:
+            rejected.append((str(path), str(error)))
+    print(f'Imported {len(copied)} CSVs; skipped {skipped} identical files; rejected {len(rejected)} files.')
+    for path in copied: print('  Saved:', path)
+    for path, error in rejected: print('  Not imported:', path, '-', error)
+    return copied, skipped, rejected
+
+
+def import_menu():
+    print('\nIMPORT EXISTING DATASETS')
+    print('Copies compatible CSVs into Datasets. Originals are kept; duplicates are skipped.')
+    source = ask_text('Folder containing your old CSVs', str(Path(__file__).resolve().parent / 'datasets'))
+    try: import_datasets(source)
+    except (OSError, ValueError) as error: print('Import failed:', error)
 
 
 def save_dataset(g, output, name):
-    """Write only the selected algorithm's CSV to a new dataset folder.
+    """Write one named CSV directly in Datasets; return its path.
 
     The interactive/batch entry points always supply DATASETS_DIR. The output
     parameter exists for isolated tests and notebook use.
@@ -232,16 +307,16 @@ def save_dataset(g, output, name):
         raise ValueError('Standard A* requires nonnegative weights.')
     if algorithm == 'astar' and any(xy is None for xy in g['nodes'].values()):
         raise ValueError('A* requires node coordinates.')
-    if not name or Path(name).name != name or name in ('.', '..'):
+    if not valid_dataset_name(name):
         raise ValueError('Dataset name must be a single folder name.')
     root = Path(output)
     root.mkdir(parents=True, exist_ok=True)
-    folder = root / name
+    folder = root
+    destination = folder / f'{name}.csv'
     suffix = 2
-    while folder.exists():
-        folder = root / f'{name}_{suffix}'
+    while destination.exists():
+        destination = folder / f'{name}_{suffix}.csv'
         suffix += 1
-    folder.mkdir()
     headers = dict(SECTIONS)
     headers['# Nodes'] = ['node_id'] if algorithm == 'johnson' else SECTIONS['# Nodes']
     node_rows = ((u,) for u in sorted(g['nodes'])) if algorithm == 'johnson' else (
@@ -252,18 +327,15 @@ def save_dataset(g, output, name):
         if distance not in ('', None) and (u, v) not in known_pairs:
             expected.append((u, v, distance))
             known_pairs.add((u, v))
-    if not expected or g['metadata'].get('kind', '').startswith('random_'):
-        print(f'Computing {len(g["nodes"]) ** 2:,} expected distances for all node pairs...')
+    if g['metadata'].get('kind') != 'grid' or not expected:
+        print(f'Computing {len(g["nodes"]) ** 2:,} expected distances using Floyd–Warshall...')
         expected = reference_distances(g)
-    destination = folder / f'{algorithm}.csv'
-    temporary = folder / f'{algorithm}.csv.tmp'
+    temporary = destination.with_suffix('.csv.tmp')
     try:
         expected_count, preview = _write_sections(temporary, headers, node_rows, g['edges'], expected)
         temporary.replace(destination)
     except BaseException:
         temporary.unlink(missing_ok=True)
-        if not any(folder.iterdir()):
-            folder.rmdir()
         raise
     print(f'Saved {len(g["nodes"])} vertices, {len(g["edges"])} directed edges:')
     print(f'  {destination.resolve()}')
@@ -275,7 +347,7 @@ def save_dataset(g, output, name):
     if g['metadata'].get('expected_negative_cycle') == 'true':
         print('  -inf means no finite shortest distance (reachable negative cycle).')
         print('  Expected Johnson behavior: Negative Cycle Detected.')
-    return folder
+    return destination
 
 
 def _write_sections(path, headers, node_rows, edges, expected):
@@ -441,18 +513,19 @@ def review_and_save(g, output, name):
     if g['metadata'].get('kind', '').startswith('random_'):
         print(f'  Expected distances: all {len(g["nodes"]) ** 2:,} ordered node pairs')
         if len(g['nodes']) > 500:
-            print('  All-pairs verification can take time and produce a large CSV, especially with negative weights.')
+            print('  All-pairs verification can take time and produce a large CSV, because Floyd–Warshall takes cubic time and quadratic memory.')
     algorithm = g['metadata']['algorithm']
     print(f'  Algorithm: {algorithm}')
-    print(f'  Node IDs: 1 to {len(g["nodes"])}')
+    print(f'  Node IDs: 0 to {len(g["nodes"]) - 1}')
     print('  Coordinates: ' + ('included' if algorithm == 'astar' else 'not generated'))
     while True:
-        name = ask_text('Dataset folder name', name)
-        if name and Path(name).name == name and name not in ('.', '..'):
+        name = input('Enter dataset name (without .csv; B = main menu): ').strip()
+        if name.lower() == 'b':
+            raise BackToMain
+        if valid_dataset_name(name):
             break
-        print('Please enter a single folder name, not a path.')
-    print(f'  Destination: {output / name}')
-    print(f'  File: {algorithm}.csv')
+        print('A dataset name is required. Do not include a folder path or .csv extension.')
+    print(f'  Destination: {Path(output) / (name + ".csv")}')
     choice = menu('Ready to generate?', ['Generate and save this dataset'], 'Cancel')
     if choice == 1:
         save_dataset(g, output, name)
@@ -523,7 +596,7 @@ def configure_grid():
     n = rows * cols
     edges = 2 * (rows*(cols-1) + cols*(rows-1))
     print(f'This four-neighbor grid has {n:,} vertices and {edges:,} directed edges.')
-    print(f'Node ID = row * {cols} + column + 1. Coordinates start at zero.')
+    print(f'Node ID = row * {cols} + column. Coordinates start at zero.')
     print('Choose source and goal later when running A*.')
     return grid_graph(rows, cols), f'astar_grid_{rows}x{cols}'
 
@@ -550,23 +623,28 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--presets', action='store_true', help='Explicit batch mode: generate all credit cases without prompts')
     args = parser.parse_args()
+    ensure_dataset_folders()
     if args.presets:
         presets(DATASETS_DIR)
         return
-    print('SHORTEST-PATH DATASET GENERATOR - VERSION 4')
+    print('SHORTEST-PATH DATASET GENERATOR - SINGLE FOLDER EDITION')
+    print('Shared dataset folder:', DATASETS_DIR)
     print('Choose a category, choose an algorithm, then configure and review.')
     print('No files are written until you select Generate and save.')
     while True:
         try:
             choice = menu('MAIN MENU', ['Test cases (predefined credit cases)',
-                                        'Generate datasets (custom settings)'], 'Exit')
+                                        'Generate datasets (custom settings)',
+                                        'Import existing datasets into shared folders'], 'Exit')
             if choice == 0:
                 print('Goodbye.')
                 return
             if choice == 1:
                 test_cases_menu(DATASETS_DIR)
-            else:
+            elif choice == 2:
                 generate_menu(DATASETS_DIR)
+            else:
+                import_menu()
         except BackToMain:
             print('Returned to main menu. No pending dataset was saved.')
 
@@ -578,3 +656,6 @@ if __name__ == '__main__':
         print('\nGeneration stopped.')
     except OSError as error:
         raise SystemExit(f'Could not write/read dataset: {error}')
+
+
+
